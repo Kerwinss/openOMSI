@@ -1,0 +1,85 @@
+name: Build openOMSI for iPhone (unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'openOMSI branch, tag or commit to build'
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  iphone:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      OPENOMSI_VERSION: 0.0.1
+    steps:
+      - name: Get openOMSI source
+        uses: actions/checkout@v4
+        with:
+          repository: openOMSI-org/openOMSI
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Record source and build tools
+        run: |
+          git rev-parse HEAD | tee SOURCE-COMMIT.txt
+          xcodebuild -version
+
+      - name: Install build tools
+        run: |
+          brew install xcodegen
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build game library and generate Xcode project
+        run: |
+          sh scripts/build-apple.sh rust ios
+          sh scripts/build-apple.sh project
+
+      - name: Build unsigned iPhone application
+        env:
+          OPENOMSI_SKIP_RUST: '1'
+        run: |
+          set -o pipefail
+          xcodebuild -project apple/openOMSI.xcodeproj \
+            -scheme openOMSI-iOS -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/openomsi-build" \
+            OPENOMSI_SKIP_RUST=1 CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build \
+            2>&1 | tee "$RUNNER_TEMP/iphone-build.log"
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload" output
+          ditto "$RUNNER_TEMP/openomsi-build/Build/Products/Release-iphoneos/openOMSI.app" \
+            "$RUNNER_TEMP/ipa/Payload/openOMSI.app"
+          (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/output/openOMSI-iphone-unsigned.ipa" Payload)
+          cp SOURCE-COMMIT.txt output/
+          shasum -a 256 output/openOMSI-iphone-unsigned.ipa > output/SHA256.txt
+
+      - name: Save iPhone application
+        uses: actions/upload-artifact@v4
+        with:
+          name: openOMSI-iphone-unsigned
+          path: output/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Save Xcode diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-build-diagnostics
+          path: ${{ runner.temp }}/iphone-build.log
+          retention-days: 7
+          if-no-files-found: ignore
+
