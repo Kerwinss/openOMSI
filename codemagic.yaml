@@ -1,0 +1,53 @@
+workflows:
+  iphone-unsigned:
+    name: OpenOMSI iPhone - unsigned
+    instance_type: mac_mini_m2
+    max_build_duration: 90
+    environment:
+      xcode: latest
+      vars:
+        OPENOMSI_VERSION: "0.0.1"
+    scripts:
+      - name: Install Rust and XcodeGen
+        script: |
+          set -eu
+          brew install xcodegen
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-apple-ios
+          git rev-parse HEAD | tee SOURCE-COMMIT.txt
+          xcodebuild -version
+      - name: Build game library
+        script: |
+          set -eu
+          export PATH="$HOME/.cargo/bin:$PATH"
+          sh scripts/build-apple.sh rust ios
+          sh scripts/build-apple.sh project
+      - name: Build iPhone app without signing
+        script: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          xcodebuild -project apple/openOMSI.xcodeproj \
+            -scheme openOMSI-iOS -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath "$CM_BUILD_DIR/build/ios" \
+            OPENOMSI_SKIP_RUST=1 CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build \
+            2>&1 | tee "$CM_BUILD_DIR/iphone-build.log"
+      - name: Package IPA for signing on Windows
+        script: |
+          set -eu
+          mkdir -p output/Payload
+          ditto "$CM_BUILD_DIR/build/ios/Build/Products/Release-iphoneos/openOMSI.app" output/Payload/openOMSI.app
+          (cd output && /usr/bin/zip -qry openOMSI-iphone-unsigned.ipa Payload)
+          cp SOURCE-COMMIT.txt output/
+          shasum -a 256 output/openOMSI-iphone-unsigned.ipa > output/SHA256.txt
+    artifacts:
+      - output/*.ipa
+      - output/SOURCE-COMMIT.txt
+      - output/SHA256.txt
+      - iphone-build.log
